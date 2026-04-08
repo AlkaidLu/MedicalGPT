@@ -130,6 +130,7 @@ dmypy.json
 
 .idea/
 .codebuddy/
+.codex
 .cache/
 outputs-dpo-qwen-v1/
 cache/

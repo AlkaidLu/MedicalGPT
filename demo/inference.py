@@ -8,6 +8,7 @@ python3 demo/inference.py --base_model Qwen/Qwen3.5-2B --lora_model outputs-sft-
 import argparse
 import json
 import os
+from queue import Empty
 from threading import Thread
 
 import torch
@@ -33,10 +34,16 @@ def stream_generate_answer(
         temperature=0.7,
         repetition_penalty=1.0,
         stop_str="</s>",
+        stream_timeout=600.0,
 ):
     """Generate answer from prompt with GPT and stream the output"""
     # Streamer for handling token generation
-    streamer = TextIteratorStreamer(tokenizer, timeout=60.0, skip_prompt=True, skip_special_tokens=True)
+    streamer = TextIteratorStreamer(
+        tokenizer,
+        timeout=stream_timeout,
+        skip_prompt=True,
+        skip_special_tokens=True,
+    )
     inputs = tokenizer(prompt, return_tensors="pt")
     input_ids = inputs["input_ids"].to(device)
     attention_mask = inputs["attention_mask"].to(device)
@@ -52,17 +59,26 @@ def stream_generate_answer(
     thread = Thread(target=model.generate, kwargs=generation_kwargs)
     thread.start()
     generated_text = ""
-    for new_text in streamer:
-        stop = False
-        pos = new_text.find(stop_str)
-        if pos != -1:
-            new_text = new_text[:pos]
-            stop = True
-        generated_text += new_text
-        if do_print:
-            print(new_text, end="", flush=True)
-        if stop:
-            break
+    try:
+        for new_text in streamer:
+            stop = False
+            pos = new_text.find(stop_str)
+            if pos != -1:
+                new_text = new_text[:pos]
+                stop = True
+            generated_text += new_text
+            if do_print:
+                print(new_text, end="", flush=True)
+            if stop:
+                break
+    except Empty as exc:
+        raise RuntimeError(
+            "Timed out waiting for the first generated tokens. "
+            "If you are running on CPU, generation can be very slow. "
+            "Try again with a longer --stream_timeout, or use non-interactive mode."
+        ) from exc
+    finally:
+        thread.join(timeout=1.0)
     if do_print:
         print()
     return generated_text
@@ -141,6 +157,12 @@ def main():
     parser.add_argument('--resize_emb', action='store_true', help='Whether to resize model token embeddings')
     parser.add_argument('--load_in_8bit', action='store_true', help='Whether to load model in 8-bit mode')
     parser.add_argument('--load_in_4bit', action='store_true', help='Whether to load model in 4-bit mode')
+    parser.add_argument(
+        '--stream_timeout',
+        type=float,
+        default=600.0,
+        help='Timeout in seconds for waiting on streamed tokens in interactive mode',
+    )
     args = parser.parse_args()
     print(args)
     load_type = 'auto'
@@ -253,6 +275,7 @@ def main():
                 temperature=args.temperature,
                 repetition_penalty=args.repetition_penalty,
                 stop_str=stop_str,
+                stream_timeout=args.stream_timeout,
             )
             if history:
                 history[-1][-1] = response.strip()
